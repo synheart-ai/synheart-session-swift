@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: macos-latest
+
+    strategy:
+      matrix:
+        swift: ['5.9']
+        platform: ['iOS', 'macOS']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build (SPM)
+        run: swift build
+
+      - name: Run tests
+        run: swift test
+
+      - name: Pod lint
+        run: pod lib lint --allow-warnings
