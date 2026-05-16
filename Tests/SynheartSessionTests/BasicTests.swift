@@ -3,12 +3,17 @@ import XCTest
 
 final class BasicTests: XCTestCase {
 
-    func testSessionModeRawValues() {
+    func testSessionModeValues() {
         XCTAssertEqual(SessionMode.focus.rawValue, "focus")
         XCTAssertEqual(SessionMode.breathing.rawValue, "breathing")
-        XCTAssertEqual(SessionMode(from: "focus"), .focus)
-        XCTAssertEqual(SessionMode(from: "breathing"), .breathing)
-        XCTAssertNil(SessionMode(from: "invalid"))
+    }
+
+    func testSessionErrorCodeValues() {
+        XCTAssertEqual(SessionErrorCode.permissionDenied.rawValue, "permission_denied")
+        XCTAssertEqual(SessionErrorCode.sensorUnavailable.rawValue, "sensor_unavailable")
+        XCTAssertEqual(SessionErrorCode.invalidState.rawValue, "invalid_state")
+        XCTAssertEqual(SessionErrorCode.lowBattery.rawValue, "low_battery")
+        XCTAssertEqual(SessionErrorCode.osTerminated.rawValue, "os_terminated")
     }
 
     func testComputeProfileDefaults() {
@@ -17,38 +22,40 @@ final class BasicTests: XCTestCase {
         XCTAssertEqual(profile.emitIntervalSec, 5)
     }
 
-    func testComputeProfileFromMap() {
-        let profile = ComputeProfile(from: ["window_sec": 30, "emit_interval_sec": 10])
-        XCTAssertEqual(profile.windowSec, 30)
-        XCTAssertEqual(profile.emitIntervalSec, 10)
-    }
-
-    func testSessionConfigFromMap() throws {
-        let map: [String: Any] = [
-            "session_id": "test-123",
-            "mode": "focus",
-            "duration_sec": 300,
-            "profile": ["window_sec": 60, "emit_interval_sec": 5]
-        ]
-        let config = try SessionConfig(from: map)
+    func testSessionConfigInit() {
+        let config = SessionConfig(
+            sessionId: "test-123",
+            mode: .focus,
+            durationSec: 300
+        )
         XCTAssertEqual(config.sessionId, "test-123")
         XCTAssertEqual(config.mode, .focus)
         XCTAssertEqual(config.durationSec, 300)
     }
 
-    func testSessionConfigMissingFieldThrows() {
-        let map: [String: Any] = ["mode": "focus"]
-        XCTAssertThrowsError(try SessionConfig(from: map))
+    func testSessionConfigFromMap() throws {
+        let map: [String: Any] = [
+            "session_id": "decode-test",
+            "mode": "breathing",
+            "duration_sec": 120,
+            "profile": ["window_sec": 30, "emit_interval_sec": 2],
+        ]
+        let config = try SessionConfig(from: map)
+        XCTAssertEqual(config.sessionId, "decode-test")
+        XCTAssertEqual(config.mode, .breathing)
+        XCTAssertEqual(config.durationSec, 120)
+        XCTAssertEqual(config.profile.windowSec, 30)
+        XCTAssertEqual(config.profile.emitIntervalSec, 2)
     }
 
-    func testSessionErrorCodes() {
+    func testSessionError() {
         let error = SessionError.permissionDenied("test")
         XCTAssertEqual(error.code, .permissionDenied)
         XCTAssertTrue(error.description.contains("PermissionDenied"))
     }
 
-    func testEngineEmitsSessionFrame() throws {
-        let engine = SessionEngine()
+    func testEngineEmitsSessionFrame() async throws {
+        let engine = SynheartSession()
         let config = SessionConfig(
             sessionId: "frame-test",
             mode: .focus,
@@ -56,24 +63,21 @@ final class BasicTests: XCTestCase {
             profile: ComputeProfile(windowSec: 5, emitIntervalSec: 1)
         )
 
-        var events: [[String: Any]] = []
-        try engine.start(config: config) { event in
-            events.append(event)
+        let stream = try engine.startSession(config: config)
+        let collector = Task<[[String: Any]], Never> {
+            var collected: [[String: Any]] = []
+            for await event in stream {
+                collected.append(event.toDictionary())
+            }
+            return collected
         }
 
-        // Wait for at least one frame emission
-        let expectation = XCTestExpectation(description: "Frame emitted")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            expectation.fulfill()
-        }
-        wait(for: [expectation], timeout: 3.0)
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        try engine.stopSession(sessionId: "frame-test")
+        let events = await collector.value
 
-        try engine.stop(sessionId: "frame-test")
-
-        // Verify session_started event
         XCTAssertEqual(events.first?["type"] as? String, "session_started")
 
-        // Find session_frame events
         let frames = events.filter { ($0["type"] as? String) == "session_frame" }
         if let frame = frames.first {
             let metrics = frame["metrics"] as? [String: Any]
@@ -85,46 +89,43 @@ final class BasicTests: XCTestCase {
     }
 
     func testEngineRejectsDuplicate() throws {
-        let engine = SessionEngine()
+        let engine = SynheartSession()
         let config = SessionConfig(
             sessionId: "dup-test",
             mode: .focus,
             durationSec: 60
         )
 
-        try engine.start(config: config) { _ in }
+        _ = try engine.startSession(config: config)
+        XCTAssertThrowsError(try engine.startSession(config: config))
 
-        XCTAssertThrowsError(
-            try engine.start(config: config) { _ in }
-        )
-
-        try engine.stop(sessionId: "dup-test")
+        try engine.stopSession(sessionId: "dup-test")
     }
 
     func testEngineGetStatusNilWhenIdle() {
-        let engine = SessionEngine()
+        let engine = SynheartSession()
         XCTAssertNil(engine.getStatus())
     }
 
     func testEngineGetStatusActiveWhenRunning() throws {
-        let engine = SessionEngine()
+        let engine = SynheartSession()
         let config = SessionConfig(
             sessionId: "status-test",
             mode: .focus,
             durationSec: 60
         )
 
-        try engine.start(config: config) { _ in }
+        _ = try engine.startSession(config: config)
 
         let status = engine.getStatus()
-        XCTAssertEqual(status?["session_id"] as? String, "status-test")
-        XCTAssertEqual(status?["active"] as? Bool, true)
+        XCTAssertEqual(status?.sessionId, "status-test")
+        XCTAssertEqual(status?.active, true)
 
-        try engine.stop(sessionId: "status-test")
+        try engine.stopSession(sessionId: "status-test")
     }
 
-    func testIngestHsiMetricsPopulatesFrameHRV() throws {
-        let engine = SessionEngine()
+    func testIngestHsiMetricsPopulatesFrameHRV() async throws {
+        let engine = SynheartSession()
         let config = SessionConfig(
             sessionId: "hsi-test",
             mode: .focus,
@@ -132,28 +133,25 @@ final class BasicTests: XCTestCase {
             profile: ComputeProfile(windowSec: 5, emitIntervalSec: 1)
         )
 
-        // Ingest HRV metrics before starting
-        engine.ingestHsiMetrics([
+        let stream = try engine.startSession(config: config)
+        engine.ingestHsiMetrics(sessionId: "hsi-test", hsiMetrics: [
             "hrv.sdnn_ms": 42.5,
             "hrv.rmssd_ms": 38.1,
             "hrv.pnn50": 21.3,
         ])
 
-        var events: [[String: Any]] = []
-        try engine.start(config: config) { event in
-            events.append(event)
+        let collector = Task<[[String: Any]], Never> {
+            var collected: [[String: Any]] = []
+            for await event in stream {
+                collected.append(event.toDictionary())
+            }
+            return collected
         }
 
-        // Wait for at least one frame emission
-        let expectation = XCTestExpectation(description: "Frame with HRV emitted")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            expectation.fulfill()
-        }
-        wait(for: [expectation], timeout: 3.0)
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        try engine.stopSession(sessionId: "hsi-test")
+        let events = await collector.value
 
-        try engine.stop(sessionId: "hsi-test")
-
-        // Find session_frame events and verify HRV values pass through
         let frames = events.filter { ($0["type"] as? String) == "session_frame" }
         if let frame = frames.first, let metrics = frame["metrics"] as? [String: Any] {
             XCTAssertEqual(metrics["hr_sdnn_ms"] as? Double, 42.5)

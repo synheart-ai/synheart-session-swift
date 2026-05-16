@@ -57,6 +57,21 @@ private class TestBiosignalProvider: BiosignalProvider {
     }
 }
 
+/// Collect the typed `SessionEvent` stream into a list of wire-format
+/// dictionaries (mirrors the on-the-wire shape the Flutter / Kotlin
+/// SDKs emit).
+private func collectAsDictionaries(
+    _ stream: AsyncStream<SessionEvent>
+) -> Task<[[String: Any]], Never> {
+    return Task<[[String: Any]], Never> {
+        var collected: [[String: Any]] = []
+        for await event in stream {
+            collected.append(event.toDictionary())
+        }
+        return collected
+    }
+}
+
 final class BehaviorProviderTests: XCTestCase {
 
     // MARK: - MockBehaviorProvider
@@ -86,10 +101,10 @@ final class BehaviorProviderTests: XCTestCase {
         XCTAssertEqual(provider.name, "mock")
     }
 
-    func testSnapshotToMap() throws {
+    func testSnapshotToMap() async throws {
         let behaviorProvider = TestBehaviorProvider()
         let biosignalProvider = TestBiosignalProvider()
-        let engine = SessionEngine(provider: biosignalProvider, behaviorProvider: behaviorProvider)
+        let engine = SynheartSession(provider: biosignalProvider, behaviorProvider: behaviorProvider)
 
         let config = SessionConfig(
             sessionId: "snapshot-map-test",
@@ -98,22 +113,15 @@ final class BehaviorProviderTests: XCTestCase {
             profile: ComputeProfile(windowSec: 10, emitIntervalSec: 1)
         )
 
-        var events: [[String: Any]] = []
-        try engine.start(config: config) { event in
-            events.append(event)
-        }
+        let stream = try engine.startSession(config: config)
+        let collector = collectAsDictionaries(stream)
 
         let baseTs = Int64(Date().timeIntervalSince1970 * 1000)
         biosignalProvider.emit(bpm: 72.0, ts: baseTs)
 
-        // Wait for a frame emission
-        let expectation = XCTestExpectation(description: "Frame emitted")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            expectation.fulfill()
-        }
-        wait(for: [expectation], timeout: 3.0)
-
-        try engine.stop(sessionId: "snapshot-map-test")
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        try engine.stopSession(sessionId: "snapshot-map-test")
+        let events = await collector.value
 
         let frames = events.filter { ($0["type"] as? String) == "session_frame" }
         XCTAssertGreaterThanOrEqual(frames.count, 1)
@@ -137,10 +145,10 @@ final class BehaviorProviderTests: XCTestCase {
 
     // MARK: - Engine integration
 
-    func testEngineWithBehaviorIncludesBehaviorInFrame() throws {
+    func testEngineWithBehaviorIncludesBehaviorInFrame() async throws {
         let behaviorProvider = TestBehaviorProvider()
         let biosignalProvider = TestBiosignalProvider()
-        let engine = SessionEngine(provider: biosignalProvider, behaviorProvider: behaviorProvider)
+        let engine = SynheartSession(provider: biosignalProvider, behaviorProvider: behaviorProvider)
 
         let config = SessionConfig(
             sessionId: "behavior-frame-test",
@@ -149,31 +157,25 @@ final class BehaviorProviderTests: XCTestCase {
             profile: ComputeProfile(windowSec: 10, emitIntervalSec: 1)
         )
 
-        var events: [[String: Any]] = []
-        try engine.start(config: config) { event in
-            events.append(event)
-        }
+        let stream = try engine.startSession(config: config)
+        let collector = collectAsDictionaries(stream)
 
         let baseTs = Int64(Date().timeIntervalSince1970 * 1000)
         biosignalProvider.emit(bpm: 72.0, ts: baseTs)
         biosignalProvider.emit(bpm: 74.0, ts: baseTs + 1000)
 
-        let expectation = XCTestExpectation(description: "Frame emitted")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            expectation.fulfill()
-        }
-        wait(for: [expectation], timeout: 3.0)
-
-        try engine.stop(sessionId: "behavior-frame-test")
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        try engine.stopSession(sessionId: "behavior-frame-test")
+        let events = await collector.value
 
         let frames = events.filter { ($0["type"] as? String) == "session_frame" }
         XCTAssertGreaterThanOrEqual(frames.count, 1)
         XCTAssertNotNil(frames.first?["behavior"])
     }
 
-    func testEngineWithoutBehaviorOmitsBehaviorKey() throws {
+    func testEngineWithoutBehaviorOmitsBehaviorKey() async throws {
         let biosignalProvider = TestBiosignalProvider()
-        let engine = SessionEngine(provider: biosignalProvider)
+        let engine = SynheartSession(provider: biosignalProvider)
 
         let config = SessionConfig(
             sessionId: "no-behavior-test",
@@ -182,32 +184,26 @@ final class BehaviorProviderTests: XCTestCase {
             profile: ComputeProfile(windowSec: 10, emitIntervalSec: 1)
         )
 
-        var events: [[String: Any]] = []
-        try engine.start(config: config) { event in
-            events.append(event)
-        }
+        let stream = try engine.startSession(config: config)
+        let collector = collectAsDictionaries(stream)
 
         let baseTs = Int64(Date().timeIntervalSince1970 * 1000)
         biosignalProvider.emit(bpm: 72.0, ts: baseTs)
 
-        let expectation = XCTestExpectation(description: "Frame emitted")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            expectation.fulfill()
-        }
-        wait(for: [expectation], timeout: 3.0)
-
-        try engine.stop(sessionId: "no-behavior-test")
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        try engine.stopSession(sessionId: "no-behavior-test")
+        let events = await collector.value
 
         let frames = events.filter { ($0["type"] as? String) == "session_frame" }
         XCTAssertGreaterThanOrEqual(frames.count, 1)
         XCTAssertNil(frames.first?["behavior"])
     }
 
-    func testEngineWithUnavailableBehaviorOmits() throws {
+    func testEngineWithUnavailableBehaviorOmits() async throws {
         let behaviorProvider = TestBehaviorProvider()
         behaviorProvider.isAvailable = false
         let biosignalProvider = TestBiosignalProvider()
-        let engine = SessionEngine(provider: biosignalProvider, behaviorProvider: behaviorProvider)
+        let engine = SynheartSession(provider: biosignalProvider, behaviorProvider: behaviorProvider)
 
         let config = SessionConfig(
             sessionId: "unavail-behavior-test",
@@ -216,31 +212,25 @@ final class BehaviorProviderTests: XCTestCase {
             profile: ComputeProfile(windowSec: 10, emitIntervalSec: 1)
         )
 
-        var events: [[String: Any]] = []
-        try engine.start(config: config) { event in
-            events.append(event)
-        }
+        let stream = try engine.startSession(config: config)
+        let collector = collectAsDictionaries(stream)
 
         let baseTs = Int64(Date().timeIntervalSince1970 * 1000)
         biosignalProvider.emit(bpm: 72.0, ts: baseTs)
 
-        let expectation = XCTestExpectation(description: "Frame emitted")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            expectation.fulfill()
-        }
-        wait(for: [expectation], timeout: 3.0)
-
-        try engine.stop(sessionId: "unavail-behavior-test")
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        try engine.stopSession(sessionId: "unavail-behavior-test")
+        let events = await collector.value
 
         let frames = events.filter { ($0["type"] as? String) == "session_frame" }
         XCTAssertGreaterThanOrEqual(frames.count, 1)
         XCTAssertNil(frames.first?["behavior"])
     }
 
-    func testSessionSummaryIncludesBehavior() throws {
+    func testSessionSummaryIncludesBehavior() async throws {
         let behaviorProvider = TestBehaviorProvider()
         let biosignalProvider = TestBiosignalProvider()
-        let engine = SessionEngine(provider: biosignalProvider, behaviorProvider: behaviorProvider)
+        let engine = SynheartSession(provider: biosignalProvider, behaviorProvider: behaviorProvider)
 
         let config = SessionConfig(
             sessionId: "summary-behavior-test",
@@ -249,15 +239,14 @@ final class BehaviorProviderTests: XCTestCase {
             profile: ComputeProfile(windowSec: 10, emitIntervalSec: 1)
         )
 
-        var events: [[String: Any]] = []
-        try engine.start(config: config) { event in
-            events.append(event)
-        }
+        let stream = try engine.startSession(config: config)
+        let collector = collectAsDictionaries(stream)
 
         let baseTs = Int64(Date().timeIntervalSince1970 * 1000)
         biosignalProvider.emit(bpm: 72.0, ts: baseTs)
 
-        try engine.stop(sessionId: "summary-behavior-test")
+        try engine.stopSession(sessionId: "summary-behavior-test")
+        let events = await collector.value
 
         let summaries = events.filter { ($0["type"] as? String) == "session_summary" }
         XCTAssertEqual(summaries.count, 1)

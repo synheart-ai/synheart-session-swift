@@ -35,6 +35,18 @@ private class TestBiosignalProvider: BiosignalProvider {
     }
 }
 
+private func collectAsDictionaries(
+    _ stream: AsyncStream<SessionEvent>
+) -> Task<[[String: Any]], Never> {
+    return Task<[[String: Any]], Never> {
+        var collected: [[String: Any]] = []
+        for await event in stream {
+            collected.append(event.toDictionary())
+        }
+        return collected
+    }
+}
+
 final class BiosignalProviderTests: XCTestCase {
 
     func testMockProviderEmitsSamples() {
@@ -83,9 +95,9 @@ final class BiosignalProviderTests: XCTestCase {
         provider.stopStreaming()
     }
 
-    func testEngineWithTestProviderReceivesSamplesInBuffer() throws {
+    func testEngineWithTestProviderReceivesSamplesInBuffer() async throws {
         let provider = TestBiosignalProvider()
-        let engine = SessionEngine(provider: provider)
+        let engine = SynheartSession(provider: provider)
         let config = SessionConfig(
             sessionId: "provider-test",
             mode: .focus,
@@ -93,30 +105,22 @@ final class BiosignalProviderTests: XCTestCase {
             profile: ComputeProfile(windowSec: 10, emitIntervalSec: 1)
         )
 
-        var events: [[String: Any]] = []
-        try engine.start(config: config) { event in
-            events.append(event)
-        }
+        let stream = try engine.startSession(config: config)
+        let collector = collectAsDictionaries(stream)
 
         XCTAssertTrue(provider.streaming)
 
-        // Inject known samples
         let baseTs = Int64(Date().timeIntervalSince1970 * 1000)
         provider.emit(bpm: 72.0, ts: baseTs)
         provider.emit(bpm: 74.0, ts: baseTs + 1000)
         provider.emit(bpm: 76.0, ts: baseTs + 2000)
 
-        // Wait for a frame emission
-        let expectation = XCTestExpectation(description: "Frame emitted")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            expectation.fulfill()
-        }
-        wait(for: [expectation], timeout: 3.0)
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        try engine.stopSession(sessionId: "provider-test")
+        let events = await collector.value
 
-        try engine.stop(sessionId: "provider-test")
         XCTAssertFalse(provider.streaming)
 
-        // Verify we got a session_started and at least the summary
         XCTAssertEqual(events.first?["type"] as? String, "session_started")
 
         let summaries = events.filter { ($0["type"] as? String) == "session_summary" }
@@ -127,32 +131,28 @@ final class BiosignalProviderTests: XCTestCase {
         XCTAssertEqual(metrics?["sample_count"] as? Int, 3)
     }
 
-    func testEngineEmitsSessionErrorOnProviderFailure() throws {
+    func testEngineEmitsSessionErrorOnProviderFailure() async throws {
         let provider = TestBiosignalProvider()
         provider.isAvailable = false
-        let engine = SessionEngine(provider: provider)
+        let engine = SynheartSession(provider: provider)
         let config = SessionConfig(
             sessionId: "error-test",
             mode: .focus,
             durationSec: 60
         )
 
-        var events: [[String: Any]] = []
-        try engine.start(config: config) { event in
-            events.append(event)
-        }
+        let stream = try engine.startSession(config: config)
+        let events = await collectAsDictionaries(stream).value
 
-        // Should have emitted session_started then session_error
         let errors = events.filter { ($0["type"] as? String) == "session_error" }
         XCTAssertEqual(errors.count, 1)
         XCTAssertEqual(errors[0]["error_code"] as? String, "sensor_unavailable")
 
-        // Engine should be idle now
         XCTAssertNil(engine.getStatus())
     }
 
-    func testDefaultInitUsessMockProvider() throws {
-        let engine = SessionEngine()
+    func testDefaultInitUsessMockProvider() async throws {
+        let engine = SynheartSession()
         let config = SessionConfig(
             sessionId: "default-test",
             mode: .focus,
@@ -160,19 +160,12 @@ final class BiosignalProviderTests: XCTestCase {
             profile: ComputeProfile(windowSec: 5, emitIntervalSec: 1)
         )
 
-        var events: [[String: Any]] = []
-        try engine.start(config: config) { event in
-            events.append(event)
-        }
+        let stream = try engine.startSession(config: config)
+        let collector = collectAsDictionaries(stream)
 
-        // Wait for a frame
-        let expectation = XCTestExpectation(description: "Frame emitted")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            expectation.fulfill()
-        }
-        wait(for: [expectation], timeout: 3.0)
-
-        try engine.stop(sessionId: "default-test")
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        try engine.stopSession(sessionId: "default-test")
+        let events = await collector.value
 
         let frames = events.filter { ($0["type"] as? String) == "session_frame" }
         XCTAssertGreaterThanOrEqual(frames.count, 1)
