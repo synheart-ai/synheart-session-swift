@@ -6,7 +6,14 @@ let package = Package(
     platforms: [
         .iOS(.v13),
         .macOS(.v13),
-        .watchOS(.v6)
+        // .v8 not .v6: the SynheartSessionHealthKit + SynheartSessionWear
+        // targets depend on synheart-wear-swift which itself declares
+        // .watchOS(.v8). Leaving this at .v6 caused SwiftPM to fail with
+        // "package product 'SynheartWear' requires minimum platform version
+        // 8.0 for the watchOS platform, but this target supports 6.0" the
+        // moment a consumer pulled SessionHealthKit on a real watchOS app
+        // (e.g. apps/synheart_life/ios/LifeWatch).
+        .watchOS(.v8)
     ],
     products: [
         .library(name: "SynheartSession", targets: ["SynheartSession"]),
