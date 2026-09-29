@@ -6,6 +6,8 @@ final class BasicTests: XCTestCase {
     func testSessionModeValues() {
         XCTAssertEqual(SessionMode.focus.rawValue, "focus")
         XCTAssertEqual(SessionMode.breathing.rawValue, "breathing")
+        XCTAssertEqual(SessionMode.typing.rawValue, "typing")
+        XCTAssertEqual(SessionMode(from: "typing"), .typing)
     }
 
     func testSessionErrorCodeValues() {
