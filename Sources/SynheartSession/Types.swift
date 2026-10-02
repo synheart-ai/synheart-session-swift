@@ -4,6 +4,8 @@ import Foundation
 public enum SessionMode: String {
     case focus = "focus"
     case breathing = "breathing"
+    /// A typing session: the host brackets a keyboard lifecycle with a watch session.
+    case typing = "typing"
 
     public init?(from string: String) {
         self.init(rawValue: string)

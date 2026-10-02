@@ -1,6 +1,6 @@
 Pod::Spec.new do |spec|
   spec.name         = "SynheartSession"
-  spec.version      = "0.2.1"
+  spec.version      = "0.3.0"
   spec.summary      = "Real-time wearable HR session capture for iOS"
   spec.homepage     = "https://github.com/synheart-ai/synheart-session-swift"
   spec.license      = { :type => "Apache-2.0", :file => "LICENSE" }
