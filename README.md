@@ -32,7 +32,7 @@ Standalone Swift SDK for Synheart Session — real-time session capture with on-
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/synheart-ai/synheart-session-swift.git", from: "0.2.0")
+    .package(url: "https://github.com/synheart-ai/synheart-session-swift.git", from: "0.3.0")
 ]
 ```
 
@@ -61,7 +61,7 @@ Or in Xcode: **File > Add Package Dependencies** and enter the repository URL.
 ### CocoaPods
 
 ```ruby
-pod 'SynheartSession', '~> 0.2.0'
+pod 'SynheartSession', '~> 0.3.0'
 ```
 
 ## Quick Start
