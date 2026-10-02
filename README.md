@@ -60,9 +60,7 @@ Or in Xcode: **File > Add Package Dependencies** and enter the repository URL.
 
 ### CocoaPods
 
-```ruby
-pod 'SynheartSession', '~> 0.3.0'
-```
+The `SynheartSession` pod is not published to CocoaPods trunk. Use Swift Package Manager.
 
 ## Quick Start
 
@@ -78,31 +76,39 @@ let config = SessionConfig(
     profile: ComputeProfile(windowSec: 60, emitIntervalSec: 5)
 )
 
-let engine = SessionEngine()
-try engine.start(config: config) { event in
-    switch event["type"] as? String {
-    case "session_started":
-        print("Session started")
-    case "session_frame":
-        let metrics = event["metrics"] as? [String: Any]
-        print("Metrics: \(metrics ?? [:])")
-    case "session_summary":
-        print("Session complete")
-    case "session_error":
-        print("Error: \(event["message"] ?? "")")
-    default:
-        break
+let session = SynheartSession()   // MockBiosignalProvider by default
+let events = try session.startSession(config: config)
+
+Task {
+    for await event in events {
+        switch event {
+        case .sessionStarted:
+            print("Session started")
+        case .sessionFrame(_, let seq, _, let metrics, _):
+            print("Frame \(seq): \(metrics)")
+        case .sessionSummary(_, let durationActualSec, _, _):
+            print("Session complete after \(durationActualSec) s")
+        case .sessionError(_, let code, let message):
+            print("Error \(code.rawValue): \(message)")
+        case .biosignalFrame:
+            break   // only when includeRawSamples is true
+        }
     }
 }
 
-// Stop early (optional)
-try engine.stop(sessionId: config.sessionId)
+// Stop early (optional); a summary is still emitted
+try session.stopSession(sessionId: config.sessionId)
 
 // Query status
-if let status = engine.getStatus() {
-    print("Active: \(status["active"] ?? false)")
+if let status = session.getStatus() {
+    print("Active: \(status.active)")
 }
+
+// When you no longer need the instance
+session.dispose()
 ```
+
+`startSession` throws `SessionError.invalidState` if a session is already running or the instance was disposed. The stream has one consumer; start iterating right away.
 
 ## SDK Usage
 
@@ -118,11 +124,11 @@ let bleHrm = BleHrmProvider()
 let devices = try await bleHrm.scan(timeoutMs: 10000)
 try await bleHrm.connect(deviceId: devices.first!.deviceId)
 
-// Wire it into the session engine
+// Wire it into the session
 let provider = WearBiosignalProvider(bleHrmProvider: bleHrm)
-let engine = SessionEngine(provider: provider)
+let session = SynheartSession(provider: provider)
 
-try engine.start(config: config) { event in
+for await event in try session.startSession(config: config) {
     // Same event handling — metrics are now computed from real HR data
 }
 ```
@@ -142,9 +148,9 @@ try await wear.initialize()
 
 // 2. Wrap it as a BiosignalProvider
 let provider = HealthKitBiosignalProvider(wear: wear)
-let engine = SessionEngine(provider: provider)
+let session = SynheartSession(provider: provider)
 
-try engine.start(config: config) { event in
+for await event in try session.startSession(config: config) {
     // Metrics are computed from HealthKit HR data
     // (Apple Watch, workout apps, or any HealthKit-writing source)
 }
@@ -164,20 +170,20 @@ try behaviorSdk.initialize()
 // 2. Wrap it as a BehaviorProvider
 let behaviorProvider = BehaviorSdkProvider(sdk: behaviorSdk)
 
-// 3. Pass both providers to the engine
-let engine = SessionEngine(behaviorProvider: behaviorProvider)
+// 3. Pass it to the session
+let session = SynheartSession(behaviorProvider: behaviorProvider)
 
-try engine.start(config: config) { event in
-    // session_frame events now include a "behavior" key
-    if let behavior = event["behavior"] as? [String: Any] {
-        print("Stability: \(behavior["stability_index"] ?? "")")
+for await event in try session.startSession(config: config) {
+    // session frames now carry a behavior map
+    if case .sessionFrame(_, _, _, _, let behavior?) = event {
+        print("Stability: \(behavior["stability_index"] ?? "n/a")")
     }
 }
 ```
 
 ### Custom provider
 
-Any type conforming to `BiosignalProvider` can drive the session engine:
+Any type conforming to `BiosignalProvider` can drive a session:
 
 ```swift
 class MyProvider: BiosignalProvider {
@@ -191,13 +197,13 @@ class MyProvider: BiosignalProvider {
     func stopStreaming() { }
 }
 
-let engine = SessionEngine(provider: MyProvider())
+let session = SynheartSession(provider: MyProvider())
 ```
 
 ## Architecture
 
 ```
-SessionEngine(provider: BiosignalProvider, behaviorProvider: BehaviorProvider?)
+SynheartSession(provider: BiosignalProvider, behaviorProvider: BehaviorProvider?)
   │
   ├── BiosignalProvider              (protocol)
   │     ├── MockBiosignalProvider     (sinusoidal mock, 1 Hz)
@@ -243,13 +249,13 @@ Each `session_frame` event contains a flat `metrics` map with:
 |-------|-------------|
 | `hr_mean_bpm` | Mean heart rate (BPM) |
 | `hr_sdnn_ms` | SDNN of RR intervals (ms) |
-| `rmssd_ms` | RMSSD approximation (ms) |
+| `rmssd_ms` | RMSSD of RR intervals (ms) |
+| `pnn50` | pNN50 |
 | `sample_count` | Number of HR samples in window |
-| `start_ms` | Window start timestamp (ms) |
-| `end_ms` | Window end timestamp (ms) |
-| `motion_rms_g` | RMS acceleration in g-force (optional, when accelerometer available) |
-| `motion_sample_count` | Number of accelerometer samples in interval (optional) |
-| `active_energy_kcal` | Cumulative active energy burned in kcal (optional, iOS only) |
+| `start_ms` | Window start timestamp (ms); absent when the window has no samples |
+| `end_ms` | Window end timestamp (ms); absent when the window has no samples |
+
+The SDK computes `hr_mean_bpm` itself. `hr_sdnn_ms`, `rmssd_ms` and `pnn50` come from `ingestHsiMetrics` and are `0.0` until you supply them (see [Standalone vs Core SDK](#standalone-vs-core-sdk)).
 
 ### Biosignal Frame Output
 
@@ -258,14 +264,14 @@ When `includeRawSamples: true` is set in `SessionConfig`, `biosignal_frame` even
 ### Error Types
 
 ```swift
-SessionError.permissionDenied("...")   // HR permission not granted
-SessionError.sensorUnavailable("...")  // No HR sensor available
-SessionError.invalidState("...")       // Duplicate session, etc.
-SessionError.lowBattery("...")         // Device battery too low
-SessionError.osTerminated("...")       // Session killed by OS
+SessionError.permissionDenied("...")
+SessionError.sensorUnavailable("...")
+SessionError.invalidState("...")       // session already running, unknown session id, or disposed
+SessionError.lowBattery("...")
+SessionError.osTerminated("...")
 ```
 
-If the provider fails to start (e.g., BLE HRM not connected), the engine emits a `session_error` event with `error_code: "sensor_unavailable"` instead of throwing.
+`startSession` and `stopSession` throw `SessionError.invalidState`. If the provider fails to start (for example, the BLE HRM is not connected), the session emits `.sessionError` with code `.sensorUnavailable` instead of throwing.
 
 ## Privacy & Security
 
@@ -290,24 +296,24 @@ swift build
 
 **With Synheart Core SDK:** HRV metrics (SDNN, RMSSD, pNN50) are automatically piped from the native session runtime via `ingestHsiMetrics()`. No action needed — the core SDK wires this up during session lifecycle.
 
-**Standalone (without core SDK):** Your app must call `engine.ingestHsiMetrics(metrics)` with pre-computed HRV values. If not called, HRV metrics default to `0.0` — mean HR is still computed locally from the sample buffer.
+**Standalone (without core SDK):** Your app must call `session.ingestHsiMetrics(sessionId:hsiMetrics:)` with pre-computed HRV values for the running session. If not called, HRV metrics default to `0.0` — mean HR is still computed locally from the sample buffer. Values are read as `Double`, so pass `42.0`, not `42`.
 
 ```swift
 // Standalone usage: manually provide HRV
-engine.ingestHsiMetrics([
+session.ingestHsiMetrics(sessionId: config.sessionId, hsiMetrics: [
     "hrv.sdnn_ms": 42.5,
     "hrv.rmssd_ms": 38.1,
     "hrv.pnn50": 21.3,
 ])
 ```
 
-## Backward Compatibility
+## Upgrading from 0.2.0
 
-`SessionEngine()` with no arguments uses `MockBiosignalProvider` by default. All existing code continues to work without changes.
+0.2.1 replaced `SessionEngine` with `SynheartSession`: `start(config:callback:)` became `startSession(config:) throws -> AsyncStream<SessionEvent>`, `stop(sessionId:)` became `stopSession(sessionId:)`, events are the typed `SessionEvent` enum (`toDictionary()` keeps the wire shape), `getStatus()` returns `SessionStatus`, and `ingestHsiMetrics` takes a session id. `SynheartSession()` with no arguments uses `MockBiosignalProvider`. 0.3.0 adds `SessionMode.typing`; handle it in any exhaustive `switch` over `SessionMode`.
 
 ## Watch Companion App
 
-The Session SDK is designed to work with a watchOS companion app that unlocks real-time biometric streaming. Due to HealthKit API limitations, real-time HR/HRV data requires an active `HKWorkoutSession` on the watch — the Session SDK handles this lifecycle automatically.
+Real-time HR/HRV from an Apple Watch requires an active `HKWorkoutSession` on the watch, run by a watchOS companion app. This package does not include a WatchConnectivity relay; the companion app and the phone-side relay are separate.
 
 - [synheart-edge-watch-ios](https://github.com/synheart-ai/synheart-edge-watch-ios) — watchOS companion app (HKWorkoutSession, HKLiveWorkoutBuilder, WCSession relay)
 
