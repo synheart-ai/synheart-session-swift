@@ -35,3 +35,13 @@ jobs:
 
       - name: Pod lint
         run: pod lib lint --allow-warnings
+
+  lint:
+    name: Lint
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install SwiftLint
+        run: brew install swiftlint
+      - name: SwiftLint
+        run: swiftlint lint --strict --config .swiftlint.yml
